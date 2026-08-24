@@ -1,0 +1,24 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Thiago Auto Spare API (Node.js + Express + MySQL)",
+  "main": "server/server.js",
+  "scripts": {
+    "prestart": "node scripts/kill-port.js 5000",
+    "start": "cross-env NODE_ENV=development node server/server.js",
+    "dev": "node scripts/kill-port.js 5000 && cross-env NODE_ENV=development node server/server.js",
+    "kill-port": "node scripts/kill-port.js 5000"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "mysql2": "^3.11.0"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3"
+  }
+}
