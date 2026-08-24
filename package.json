@@ -5,10 +5,11 @@
   "description": "Thiago Auto Spare API (Node.js + Express + MySQL)",
   "main": "server/server.js",
   "scripts": {
-    "prestart": "node scripts/kill-port.js 5000",
+    "prestart": "node scripts/kill-port.js 5001",
     "start": "cross-env NODE_ENV=development node server/server.js",
-    "dev": "node scripts/kill-port.js 5000 && cross-env NODE_ENV=development node server/server.js",
-    "kill-port": "node scripts/kill-port.js 5000"
+    "start:prod": "cross-env NODE_ENV=production node server/server.js",
+    "dev": "node scripts/kill-port.js 5001 && cross-env NODE_ENV=development node server/server.js",
+    "kill-port": "node scripts/kill-port.js 5001"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",

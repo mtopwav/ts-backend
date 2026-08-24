@@ -1,5 +1,6 @@
 // @ts-nocheck
 require("./loadEnv");
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
@@ -4722,6 +4723,15 @@ app.use("/api", (req, res) => {
   });
 });
 
+// Production — serve React build (same origin as /api)
+const buildPath = path.join(__dirname, "..", "..", "frontend", "ts", "build");
+if (!isDev) {
+  app.use(express.static(buildPath));
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(buildPath, "index.html"));
+  });
+}
+
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
@@ -4732,7 +4742,7 @@ app.use((err, req, res, next) => {
 });
 
 // Server start
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 const DB_NAME = process.env.DB_NAME || "thiago_db";
 
 (async () => {
@@ -4751,26 +4761,23 @@ const DB_NAME = process.env.DB_NAME || "thiago_db";
   }
 
   const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log('\n========================================');
-  console.log(' Backend Server Started Successfully!');
-  console.log('========================================');
+  console.log("\n========================================");
+  console.log(` Backend started (${isDev ? "development" : "production"})`);
+  console.log("========================================");
   console.log(` Server URL: http://localhost:${PORT}`);
-  console.log(` API Base: http://localhost:${PORT}/api`);
-  console.log(` Database: ${DB_NAME} (user: ${process.env.DB_USER || "root"})`);
-  console.log(` CORS origins: ${allowedOrigins.join(", ") || "(none)"}`);
-  console.log(`\n Available Endpoints:`);
-  console.log(`   GET  /api/test      - Test server connection`);
-  console.log(`   GET  /api/test-db   - Test database connection`);
-  console.log(`   GET  /api/health    - Health check`);
-  console.log(`   POST /api/login     - User login`);
-  console.log(`   POST /api/employees - Add new employee`);
-  console.log(`   POST /api/spareparts - Add new spare part`);
-  console.log(`   GET  /api/customers - Get all customers`);
-  console.log(`   POST /api/customers - Add new customer`);
-  console.log(`   PUT  /api/customers/:id - Update customer`);
-  console.log(`   DELETE /api/customers/:id - Delete customer`);
-  console.log('\n Make sure MySQL is running in XAMPP!');
-  console.log('========================================\n');
+  console.log(` API Base:   http://localhost:${PORT}/api`);
+  if (!isDev) {
+    console.log(` App UI:     http://localhost:${PORT}`);
+  }
+  console.log(` Database:   ${DB_NAME} (user: ${process.env.DB_USER || "root"})`);
+  console.log(` CORS:       ${allowedOrigins.join(", ") || "(none)"}`);
+  console.log("\n Endpoints:");
+  console.log("   GET  /api/test      - Test server connection");
+  console.log("   GET  /api/test-db   - Test database connection");
+  console.log("   GET  /api/health    - Health check");
+  console.log("   POST /api/login     - User login");
+  console.log("\n Make sure MySQL is running!");
+  console.log("========================================\n");
   });
 
   server.on("error", (error) => {

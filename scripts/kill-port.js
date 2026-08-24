@@ -1,10 +1,10 @@
 /**
  * Free a TCP port before starting the dev server (Windows-friendly).
- * Usage: node scripts/kill-port.js 5000
+ * Usage: node scripts/kill-port.js 5001
  */
 const { execSync } = require("child_process");
 
-const port = process.argv[2] || "5000";
+const port = process.argv[2] || "5001";
 const isWin = process.platform === "win32";
 
 try {
