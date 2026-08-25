@@ -120,12 +120,10 @@ app.use(cors({
     if (isDev && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
       return callback(null, true);
     }
-    if (allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+    if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    // Avoid throwing — Express would turn it into "Internal server error"
-    console.warn(`[CORS] Blocked origin: ${origin}`);
-    callback(null, false);
+    callback(new Error(`CORS blocked origin: ${origin}`));
   },
   credentials: true
 }));
@@ -4726,67 +4724,20 @@ app.use("/api", (req, res) => {
 });
 
 // Production — serve React build (same origin as /api)
-const fs = require("fs");
-const buildPath = path.resolve(__dirname, "..", "..", "frontend", "ts", "build");
-const indexHtml = path.join(buildPath, "index.html");
-const hasFrontendBuild = fs.existsSync(indexHtml);
-
+const buildPath = path.join(__dirname, "..", "..", "frontend", "ts", "build");
 if (!isDev) {
-  if (!hasFrontendBuild) {
-    console.warn(
-      `\n[WARN] Frontend build not found at:\n  ${indexHtml}\n` +
-        "  Run from project root: npm run build\n" +
-        "  API still works at /api — UI will not until build exists.\n"
-    );
-  } else {
-    console.log(`Serving frontend from: ${buildPath}`);
-  }
-
   app.use(express.static(buildPath));
-
   app.get("*", (req, res) => {
-    if (!hasFrontendBuild) {
-      return res.status(503).json({
-        success: false,
-        message:
-          "Frontend build missing. Run: npm run build (from project root), then restart the backend.",
-        buildPath,
-        api: "/api"
-      });
-    }
-    return res.sendFile(indexHtml, (err) => {
-      if (err) {
-        console.error("sendFile index.html failed:", err.message);
-        if (!res.headersSent) {
-          res.status(500).json({
-            success: false,
-            message: "Failed to serve frontend",
-            error: process.env.NODE_ENV === "development" ? err.message : undefined
-          });
-        }
-      }
-    });
-  });
-} else {
-  // Development — root is API-only; React runs on :3000
-  app.get("/", (req, res) => {
-    res.json({
-      success: true,
-      message: "Thiago Auto Spare API (development). Open the React app on port 3000.",
-      api: "/api"
-    });
+    res.sendFile(path.join(buildPath, "index.html"));
   });
 }
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error(err.stack || err);
-  if (res.headersSent) return next(err);
+  console.error(err.stack);
   res.status(500).json({
     success: false,
-    message: err.message && String(err.message).startsWith("CORS")
-      ? err.message
-      : "Internal server error"
+    message: "Internal server error"
   });
 });
 
