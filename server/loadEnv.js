@@ -1,14 +1,15 @@
 const path = require("path");
 const dotenv = require("dotenv");
 
-const envPath = path.join(__dirname, ".env");
+const envDir = __dirname;
+const nodeEnv = process.env.NODE_ENV || "development";
 
-dotenv.config({
-  path: envPath
-});
-
-module.exports = {
-  nodeEnv: process.env.NODE_ENV || "production"
-};
+if (nodeEnv === "production") {
+  dotenv.config({ path: path.join(envDir, ".env") });
+} else {
+  // Local development — never load production .env
+  dotenv.config({ path: path.join(envDir, ".env.development") });
+  dotenv.config({ path: path.join(envDir, ".env.local"), override: true });
+}
 
 module.exports = { nodeEnv };
