@@ -116,14 +116,18 @@ const isDev = (process.env.NODE_ENV || "development") !== "production";
 
 app.use(cors({
   origin(origin, callback) {
+    // curl / same-machine / no browser Origin
     if (!origin) return callback(null, true);
+    if (allowedOrigins.includes("*")) return callback(null, true);
     if (isDev && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
       return callback(null, true);
     }
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    callback(new Error(`CORS blocked origin: ${origin}`));
+    // Never throw here — throwing becomes {"message":"Internal server error"} on login
+    console.warn(`[CORS] Blocked origin: ${origin}. Allowed: ${allowedOrigins.join(", ") || "(none)"}`);
+    callback(null, false);
   },
   credentials: true
 }));
@@ -456,12 +460,15 @@ app.post("/api/login", async (req, res) => {
     console.error("Login error:", error);
     console.error("Error details:", {
       message: error.message,
+      code: error.code,
+      sqlMessage: error.sqlMessage,
       stack: error.stack
     });
     res.status(500).json({
       success: false,
       message: "An error occurred during login",
-      error: process.env.NODE_ENV === "development" ? error.message : undefined
+      // Always include a short DB/code hint so VPS login issues are diagnosable
+      error: error.sqlMessage || error.message || undefined
     });
   }
 });
