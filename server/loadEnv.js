@@ -1,15 +1,26 @@
 const path = require("path");
+const fs = require("fs");
 const dotenv = require("dotenv");
 
 const envDir = __dirname;
-const nodeEnv = process.env.NODE_ENV || "development";
+const prodPath = path.join(envDir, ".env");
+const devPath = path.join(envDir, ".env.development");
+const localPath = path.join(envDir, ".env.local");
 
-if (nodeEnv === "production") {
-  dotenv.config({ path: path.join(envDir, ".env") });
+// Shell/pm2 NODE_ENV wins. If unset and .env exists (typical on VPS), use production.
+const explicitEnv = process.env.NODE_ENV;
+const useProduction =
+  explicitEnv === "production" ||
+  (!explicitEnv && fs.existsSync(prodPath));
+
+if (useProduction) {
+  dotenv.config({ path: prodPath });
 } else {
-  // Local development — never load production .env
-  dotenv.config({ path: path.join(envDir, ".env.development") });
-  dotenv.config({ path: path.join(envDir, ".env.local"), override: true });
+  dotenv.config({ path: devPath });
+  dotenv.config({ path: localPath, override: true });
 }
+
+const nodeEnv =
+  process.env.NODE_ENV || (useProduction ? "production" : "development");
 
 module.exports = { nodeEnv };
