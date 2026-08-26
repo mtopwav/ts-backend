@@ -17,6 +17,20 @@ const {
 
 const app = express();
 
+// Some VPS proxies map /api/* → /* (strip the /api prefix).
+// Restore it so routes like POST /api/login still match.
+const STRIPPED_API_PATH =
+  /^\/(login|health|test|test-db|debug-admin|admin|employees|categories|brands|spareparts|customers|payments|loans|expenses|revenues|invoices|salaries|sms)(\/|$)/i;
+
+app.use((req, res, next) => {
+  if (req.path === "/api" || req.path.startsWith("/api/")) return next();
+  if (STRIPPED_API_PATH.test(req.path)) {
+    const suffix = req.url.startsWith("/") ? req.url : `/${req.url}`;
+    req.url = `/api${suffix}`;
+  }
+  next();
+});
+
 // Branch location helpers (Boma / Geita isolation)
 function normalizeBranchLocation(value) {
   if (value == null || String(value).trim() === "") return null;
