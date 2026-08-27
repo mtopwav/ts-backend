@@ -1108,8 +1108,11 @@ async function ensureSparepartsTable() {
       quantity_added INT NOT NULL DEFAULT 0,
       soldout_quantity INT NOT NULL DEFAULT 0,
       quantity INT NOT NULL DEFAULT 0,
+      buying_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
       wholesale_price DECIMAL(12,2) NULL,
       retail_price DECIMAL(12,2) NULL,
+      wholesale_profit DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      retail_profit DECIMAL(12,2) NOT NULL DEFAULT 0.00,
       status VARCHAR(50) DEFAULT 'In Stock',
       location VARCHAR(255) NOT NULL DEFAULT '',
       supplier VARCHAR(255) NULL,
@@ -1150,6 +1153,11 @@ async function ensureSparepartsTable() {
   if (!hasSoldoutQuantity) {
     await promisePool.query('ALTER TABLE spareparts ADD COLUMN soldout_quantity INT NOT NULL DEFAULT 0 AFTER quantity_added');
   }
+
+  // Cost / profit columns (VPS schema)
+  await ensureTableColumn('spareparts', 'buying_price', 'DECIMAL(12,2) NOT NULL DEFAULT 0.00');
+  await ensureTableColumn('spareparts', 'wholesale_profit', 'DECIMAL(12,2) NOT NULL DEFAULT 0.00');
+  await ensureTableColumn('spareparts', 'retail_profit', 'DECIMAL(12,2) NOT NULL DEFAULT 0.00');
 
   // part_number is not unique; duplicate checks use part_number + location in API
   const [partIndexes] = await promisePool.query(
@@ -1592,8 +1600,11 @@ app.get("/api/spareparts", async (req, res) => {
         sp.quantity_added,
         sp.soldout_quantity,
         sp.quantity,
+        sp.buying_price,
         sp.wholesale_price,
         sp.retail_price,
+        sp.wholesale_profit,
+        sp.retail_profit,
         sp.status,
         sp.location,
         sp.supplier,
@@ -1637,13 +1648,21 @@ app.post("/api/spareparts", async (req, res) => {
       category_id,
       brand_id,
       quantity,
+      quantity_added,
+      soldout_quantity,
+      buying_price,
+      wholesale_price,
       retail_price,
+      wholesale_profit,
+      retail_profit,
       status,
       location,
       supplier
     } = req.body;
     const stripCommas = (v) => (v == null || v === '' ? null : parseFloat(String(v).replace(/,/g, '')));
     const retailVal = stripCommas(retail_price);
+    const buyingVal = stripCommas(buying_price) ?? 0;
+    const wholesaleVal = stripCommas(wholesale_price);
     if (!part_name || !part_number || !category_id || !brand_id || quantity === undefined || (retailVal == null || isNaN(retailVal))) {
       return res.status(400).json({
         success: false,
@@ -1668,19 +1687,43 @@ app.post("/api/spareparts", async (req, res) => {
         message: "A spare part with this part number already exists at this location"
       });
     }
-    const qtyInt = parseInt(quantity, 10);
+    const qtyInt = parseInt(quantity, 10) || 0;
+    const qtyAddedInt =
+      quantity_added !== undefined && quantity_added !== null && quantity_added !== ''
+        ? parseInt(quantity_added, 10) || 0
+        : qtyInt;
+    const soldoutInt =
+      soldout_quantity !== undefined && soldout_quantity !== null && soldout_quantity !== ''
+        ? parseInt(soldout_quantity, 10) || 0
+        : 0;
+    const wholesaleProfitVal =
+      wholesale_profit !== undefined && wholesale_profit !== null && wholesale_profit !== ''
+        ? stripCommas(wholesale_profit) ?? 0
+        : Math.max(0, (wholesaleVal ?? 0) - (buyingVal || 0));
+    const retailProfitVal =
+      retail_profit !== undefined && retail_profit !== null && retail_profit !== ''
+        ? stripCommas(retail_profit) ?? 0
+        : Math.max(0, (retailVal || 0) - (buyingVal || 0));
+
     const [result] = await promisePool.query(
       `INSERT INTO spareparts 
-       (part_name, part_number, category_id, brand_id, quantity_added, quantity, retail_price, status, location, supplier, date_added)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())`,
+       (part_name, part_number, category_id, brand_id, quantity_added, soldout_quantity, quantity,
+        buying_price, wholesale_price, retail_price, wholesale_profit, retail_profit,
+        status, location, supplier, date_added)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())`,
       [
         part_name.trim(),
         part_number.trim(),
         parseInt(category_id),
         parseInt(brand_id),
+        qtyAddedInt,
+        soldoutInt,
         qtyInt,
-        qtyInt,
+        buyingVal || 0,
+        wholesaleVal,
         retailVal,
+        wholesaleProfitVal || 0,
+        retailProfitVal || 0,
         status,
         location.trim(),
         supplier || 'Thiago Auto Spare'
@@ -1702,8 +1745,11 @@ app.post("/api/spareparts", async (req, res) => {
         sp.quantity_added,
         sp.soldout_quantity,
         sp.quantity,
+        sp.buying_price,
         sp.wholesale_price,
         sp.retail_price,
+        sp.wholesale_profit,
+        sp.retail_profit,
         sp.status,
         sp.location,
         sp.supplier,
@@ -1756,8 +1802,13 @@ app.put("/api/spareparts/:id", async (req, res) => {
       category_id,
       brand_id,
       quantity,
+      quantity_added,
+      soldout_quantity,
+      buying_price,
       wholesale_price,
       retail_price,
+      wholesale_profit,
+      retail_profit,
       status,
       location,
       supplier
@@ -1831,8 +1882,11 @@ app.put("/api/spareparts/:id", async (req, res) => {
           sp.quantity_added,
           sp.soldout_quantity,
           sp.quantity,
+          sp.buying_price,
           sp.wholesale_price,
           sp.retail_price,
+          sp.wholesale_profit,
+          sp.retail_profit,
           sp.status,
           sp.location,
           sp.supplier,
@@ -1869,6 +1923,8 @@ app.put("/api/spareparts/:id", async (req, res) => {
       });
     }
 
+    const stripCommas = (v) => (v == null || v === '' ? null : parseFloat(String(v).replace(/,/g, '')));
+    const buyingVal = stripCommas(buying_price) ?? 0;
     const wholesaleVal =
       wholesale_price === null || wholesale_price === undefined || wholesale_price === ''
         ? null
@@ -1920,7 +1976,7 @@ app.put("/api/spareparts/:id", async (req, res) => {
         : 'Thiago Auto Spare';
 
     const [currentParts] = await promisePool.query(
-      "SELECT quantity, quantity_added FROM spareparts WHERE id = ?",
+      "SELECT quantity, quantity_added, soldout_quantity FROM spareparts WHERE id = ?",
       [partId]
     );
 
@@ -1933,8 +1989,16 @@ app.put("/api/spareparts/:id", async (req, res) => {
 
     const currentQuantity = parseInt(currentParts[0].quantity, 10) || 0;
     const currentQtyAdded = parseInt(currentParts[0].quantity_added, 10) || 0;
+    const currentSoldout = parseInt(currentParts[0].soldout_quantity, 10) || 0;
     let finalQuantity = qtyVal;
-    let finalQtyAdded = currentQtyAdded;
+    let finalQtyAdded =
+      quantity_added !== undefined && quantity_added !== null && quantity_added !== ''
+        ? parseInt(quantity_added, 10) || currentQtyAdded
+        : currentQtyAdded;
+    let finalSoldout =
+      soldout_quantity !== undefined && soldout_quantity !== null && soldout_quantity !== ''
+        ? parseInt(soldout_quantity, 10) || 0
+        : currentSoldout;
 
     if (quantity_to_add !== undefined && quantity_to_add !== null && quantity_to_add !== '') {
       const quantityToAdd = parseInt(quantity_to_add, 10) || 0;
@@ -1946,10 +2010,21 @@ app.put("/api/spareparts/:id", async (req, res) => {
       }
     }
 
+    const wholesaleProfitVal =
+      wholesale_profit !== undefined && wholesale_profit !== null && wholesale_profit !== ''
+        ? stripCommas(wholesale_profit) ?? 0
+        : Math.max(0, (wholesaleVal ?? 0) - (buyingVal || 0));
+    const retailProfitVal =
+      retail_profit !== undefined && retail_profit !== null && retail_profit !== ''
+        ? stripCommas(retail_profit) ?? 0
+        : Math.max(0, (retailVal || 0) - (buyingVal || 0));
+
     await promisePool.query(
       `UPDATE spareparts
        SET part_name = ?, part_number = ?, category_id = ?, brand_id = ?,
-           quantity = ?, quantity_added = ?, wholesale_price = ?, retail_price = ?,
+           quantity = ?, quantity_added = ?, soldout_quantity = ?,
+           buying_price = ?, wholesale_price = ?, retail_price = ?,
+           wholesale_profit = ?, retail_profit = ?,
            status = ?, location = ?, supplier = ?, updated_at = NOW()
        WHERE id = ?`,
       [
@@ -1959,8 +2034,12 @@ app.put("/api/spareparts/:id", async (req, res) => {
         parseInt(brand_id, 10),
         finalQuantity,
         finalQtyAdded,
+        finalSoldout,
+        buyingVal || 0,
         wholesaleVal,
         retailVal,
+        wholesaleProfitVal || 0,
+        retailProfitVal || 0,
         statusVal,
         locationVal,
         supplierVal,
@@ -1980,8 +2059,11 @@ app.put("/api/spareparts/:id", async (req, res) => {
         sp.quantity_added,
         sp.soldout_quantity,
         sp.quantity,
+        sp.buying_price,
         sp.wholesale_price,
         sp.retail_price,
+        sp.wholesale_profit,
+        sp.retail_profit,
         sp.status,
         sp.location,
         sp.supplier,
