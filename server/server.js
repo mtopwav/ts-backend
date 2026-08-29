@@ -3505,6 +3505,45 @@ app.delete("/api/payments/:id", async (req, res) => {
 });
 
 // Update payment details (amount_received, payment_method, optional per-channel amounts) - cashier confirm
+// Update loan_status only (does not change payment status or sparepart stock)
+app.put("/api/payments/:id/loan-status", async (req, res) => {
+  try {
+    await ensurePaymentsTable();
+    const { id } = req.params;
+    const loanStatus = String(req.body?.loan_status || "").trim();
+
+    if (!["Approved", "Rejected", "Pending"].includes(loanStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid loan_status value"
+      });
+    }
+
+    const [existing] = await promisePool.query("SELECT id FROM payments WHERE id = ?", [id]);
+    if (existing.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment not found"
+      });
+    }
+
+    await promisePool.query("UPDATE payments SET loan_status = ? WHERE id = ?", [loanStatus, id]);
+
+    res.json({
+      success: true,
+      message: "Loan status updated",
+      loan_status: loanStatus
+    });
+  } catch (error) {
+    console.error("Update loan status error:", error);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while updating loan status",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined
+    });
+  }
+});
+
 app.put("/api/payments/:id/details", async (req, res) => {
   try {
     await ensurePaymentsTable();
