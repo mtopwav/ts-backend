@@ -2156,6 +2156,7 @@ async function ensurePaymentsTable() {
       status VARCHAR(50) DEFAULT 'Pending',
       loan_status VARCHAR(50) NULL,
       \`return\` DECIMAL(12,2) NULL,
+      profit DECIMAL(12,2) NOT NULL DEFAULT 0.00,
       approved_by INT NULL,
       approved_at DATETIME NULL,
       confirmed_by_cashier_id INT NULL,
@@ -2293,6 +2294,20 @@ async function ensurePaymentsTable() {
       throw e;
     }
   }
+  // Transaction profit: Σ qty × (selling unit price − buying price)
+  await ensureTableColumn(
+    "payments",
+    "profit",
+    "DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `return`"
+  );
+  try {
+    await promisePool.query(
+      "UPDATE payments SET profit = 0 WHERE profit IS NULL"
+    );
+  } catch (e) {
+    /* ignore if column constraints already apply */
+  }
+  await backfillApprovedPaymentsProfit();
   await ensureTableColumn("payments", "location", "VARCHAR(255) NULL AFTER employee_id");
   try {
     await promisePool.query("ALTER TABLE payments ADD INDEX idx_location (location)");
@@ -2308,6 +2323,88 @@ async function ensurePaymentsTable() {
   await backfillPaymentsLocationFromEmployees();
   await backfillCustomersLocationFromPayments();
   await backfillLoansLocationFromPayments();
+}
+
+/**
+ * Backfill payments.profit for Approved rows still at default 0
+ * (column was added after those sales were approved).
+ */
+async function backfillApprovedPaymentsProfit() {
+  try {
+    const [rows] = await promisePool.query(
+      `SELECT id, sparepart_id, quantity, price, price_type, items_json
+       FROM payments
+       WHERE status = 'Approved'
+         AND (profit IS NULL OR profit = 0)
+         AND (items_json IS NOT NULL OR sparepart_id IS NOT NULL)
+       LIMIT 500`
+    );
+    for (const row of rows) {
+      const profit = await computePaymentProfit(promisePool, row);
+      if (!Number.isFinite(profit) || profit === 0) continue;
+      await promisePool.query(`UPDATE payments SET profit = ? WHERE id = ?`, [
+        profit,
+        row.id,
+      ]);
+    }
+  } catch (e) {
+    console.error("backfillApprovedPaymentsProfit:", e.message);
+  }
+}
+
+/**
+ * Compute payment profit from line items: Σ qty × (unit sell price − buying_price).
+ */
+async function computePaymentProfit(db, payment) {
+  let items = [];
+  if (payment.items_json) {
+    try {
+      const parsed =
+        typeof payment.items_json === "string"
+          ? JSON.parse(payment.items_json)
+          : payment.items_json;
+      items = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      items = [];
+    }
+  }
+  if (!items.length && payment.sparepart_id) {
+    items = [
+      {
+        sparepart_id: payment.sparepart_id,
+        quantity: payment.quantity,
+        unit_price: payment.price ?? payment.unit_price,
+      },
+    ];
+  }
+
+  let profit = 0;
+  const priceType = String(payment.price_type || "retail").trim().toLowerCase();
+
+  for (const item of items) {
+    const sparepartId = parseInt(item.sparepart_id ?? item.sparepartId, 10);
+    const qty = parseInt(item.quantity, 10) || 0;
+    if (!Number.isFinite(sparepartId) || qty <= 0) continue;
+
+    let sell = parseFloat(item.unit_price ?? item.price ?? item.unitPrice);
+    if (!Number.isFinite(sell)) sell = NaN;
+
+    const [spRows] = await db.query(
+      `SELECT buying_price, retail_price, wholesale_price FROM spareparts WHERE id = ?`,
+      [sparepartId]
+    );
+    const sp = spRows[0] || {};
+    const buy = parseFloat(sp.buying_price) || 0;
+    if (!Number.isFinite(sell)) {
+      sell =
+        priceType === "wholesale"
+          ? parseFloat(sp.wholesale_price) || 0
+          : parseFloat(sp.retail_price) || 0;
+    }
+    profit += qty * (sell - buy);
+  }
+
+  return Math.round(profit * 100) / 100;
 }
 
 /** Log each increase to amount_received (installment) for per-day / per-range reporting. */
@@ -2838,6 +2935,7 @@ app.get("/api/payments", async (req, res) => {
        p.price_type,
        p.status,
        p.\`return\` AS return_amount,
+       p.profit,
         p.approved_by,
         approver.full_name AS approver_name,
         p.approved_at,
@@ -3046,7 +3144,7 @@ app.put("/api/payments/:id/status", async (req, res) => {
 
         for (const item of itemsToDeduct) {
           const [sp] = await connection.query(
-            `SELECT id, quantity, part_name, part_number FROM spareparts WHERE id = ? FOR UPDATE`,
+            `SELECT id, quantity, part_name, part_number, buying_price, retail_price, wholesale_price FROM spareparts WHERE id = ? FOR UPDATE`,
             [item.sparepart_id]
           );
           if (sp.length === 0) {
@@ -3087,15 +3185,18 @@ app.put("/api/payments/:id/status", async (req, res) => {
           );
         }
 
+        const paymentProfit = await computePaymentProfit(connection, payment);
+
         await connection.query(
           `UPDATE payments 
            SET status = ?,
                loan_status = CASE WHEN ? THEN ? ELSE loan_status END,
+               profit = ?,
                approved_by = ?, approved_at = NOW()${paymentTypeVal ? ", payment_type = ?" : ""}
            WHERE id = ?`,
           paymentTypeVal
-            ? [status, shouldUpdateLoanStatus, status, approver_id, paymentTypeVal, id]
-            : [status, shouldUpdateLoanStatus, status, approver_id, id]
+            ? [status, shouldUpdateLoanStatus, status, paymentProfit, approver_id, paymentTypeVal, id]
+            : [status, shouldUpdateLoanStatus, status, paymentProfit, approver_id, id]
         );
 
         if (amountRemain > 0) {
