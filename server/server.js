@@ -2295,11 +2295,20 @@ async function ensurePaymentsTable() {
     }
   }
   // Transaction profit: Σ qty × (selling unit price − buying price)
+  // Must have DEFAULT 0.00 — NOT NULL without default breaks INSERT under STRICT sql_mode
+  // ("Field 'profit' doesn't have a default value") and blocks generate-sales.
   await ensureTableColumn(
     "payments",
     "profit",
     "DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `return`"
   );
+  try {
+    await promisePool.query(
+      "ALTER TABLE payments MODIFY COLUMN profit DECIMAL(12,2) NOT NULL DEFAULT 0.00"
+    );
+  } catch (e) {
+    console.error("ensurePaymentsTable: could not normalize profit column:", e.message);
+  }
   try {
     await promisePool.query(
       "UPDATE payments SET profit = 0 WHERE profit IS NULL"
@@ -2824,8 +2833,8 @@ app.post("/api/payments", async (req, res) => {
       // Use first item's sparepart_id for backward compatibility, but store all items in items_json
       const [result] = await connection.query(
         `INSERT INTO payments 
-         (customer_id, employee_id, location, sparepart_id, quantity, price, payment_method, status, approved_by, approved_at, items_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (customer_id, employee_id, location, sparepart_id, quantity, price, payment_method, status, profit, approved_by, approved_at, items_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           parseInt(customer_id),
           parseInt(employee_id),
@@ -2835,6 +2844,7 @@ app.post("/api/payments", async (req, res) => {
           parseFloat(firstItem.unit_price || 0), // First item's price for backward compatibility
           payment_method != null && payment_method !== '' ? payment_method : null, // Do not default; cashier sets when confirming
           "Pending",
+          0, // profit filled on approve
           null, // approved_by - NULL initially, set by accountant later
           null, // approved_at - NULL initially, set by accountant later
           itemsJson // Store all items as JSON
