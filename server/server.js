@@ -3791,15 +3791,26 @@ async function ensureExpensesTable() {
 app.get("/api/expenses", async (req, res) => {
   try {
     const branchLoc = normalizeBranchLocation(req.query.location);
-    console.log("GET /api/expenses", branchLoc ? `(location=${branchLoc})` : "(all locations)");
+    const dateFilter = req.query.date ? String(req.query.date).trim().slice(0, 10) : null;
+    const hasValidDate = dateFilter && /^\d{4}-\d{2}-\d{2}$/.test(dateFilter);
+    console.log(
+      "GET /api/expenses",
+      branchLoc ? `(location=${branchLoc})` : "(all locations)",
+      hasValidDate ? `(date=${dateFilter})` : ""
+    );
     await ensureExpensesTable();
 
     const params = [];
-    let whereClause = "";
+    const whereParts = [];
     if (branchLoc) {
-      whereClause = " WHERE LOWER(TRIM(location)) = LOWER(?)";
+      whereParts.push("LOWER(TRIM(location)) = LOWER(?)");
       params.push(branchLoc);
     }
+    if (hasValidDate) {
+      whereParts.push("expense_date = ?");
+      params.push(dateFilter);
+    }
+    const whereClause = whereParts.length ? ` WHERE ${whereParts.join(" AND ")}` : "";
 
     const [expenses] = await promisePool.query(
       `SELECT id, expense_date AS date, description, category, amount, status, location, added_by, created_at, updated_at
