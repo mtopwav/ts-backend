@@ -3809,7 +3809,8 @@ app.get("/api/expenses", async (req, res) => {
       params.push(branchLoc);
     }
     if (hasValidDate) {
-      whereParts.push("expense_date = ?");
+      // Compare calendar date only (handles DATE / DATETIME and avoids TZ mismatch)
+      whereParts.push("DATE(expense_date) = ?");
       params.push(dateFilter);
     }
     if (statusFilter) {
@@ -3819,7 +3820,9 @@ app.get("/api/expenses", async (req, res) => {
     const whereClause = whereParts.length ? ` WHERE ${whereParts.join(" AND ")}` : "";
 
     const [expenses] = await promisePool.query(
-      `SELECT id, expense_date AS date, description, category, amount, status, location, added_by, created_at, updated_at
+      `SELECT id,
+              DATE_FORMAT(expense_date, '%Y-%m-%d') AS date,
+              description, category, amount, status, location, added_by, created_at, updated_at
        FROM expenses
        ${whereClause}
        ORDER BY expense_date DESC, id DESC`,
