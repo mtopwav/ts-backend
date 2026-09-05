@@ -3964,6 +3964,32 @@ app.put("/api/expenses/:id", async (req, res) => {
   }
 });
 
+// Delete expense
+app.delete("/api/expenses/:id", async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const { id } = req.params;
+
+    const [result] = await promisePool.query(`DELETE FROM expenses WHERE id = ?`, [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: "Expense not found" });
+    }
+
+    res.json({
+      success: true,
+      message: "Expense deleted"
+    });
+  } catch (error) {
+    console.error("Delete expense error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "An error occurred while deleting expense",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined
+    });
+  }
+});
+
 // ==================== REVENUES ENDPOINTS ====================
 
 async function ensureRevenuesTable() {
