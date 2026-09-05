@@ -3765,26 +3765,48 @@ async function ensureExpensesTable() {
       category VARCHAR(100) NOT NULL,
       amount DECIMAL(12,2) NOT NULL,
       status VARCHAR(50) DEFAULT 'Pending',
+      location VARCHAR(255) NULL,
       added_by INT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       INDEX idx_expense_date (expense_date),
       INDEX idx_category (category),
-      INDEX idx_status (status)
+      INDEX idx_status (status),
+      INDEX idx_location (location)
     )
   `);
+  await ensureTableColumn("expenses", "location", "VARCHAR(255) NULL AFTER status");
+  try {
+    await promisePool.query("ALTER TABLE expenses ADD INDEX idx_location (location)");
+  } catch (e) {
+    const isDup =
+      e.errno === 1061 ||
+      e.code === "ER_DUP_KEYNAME" ||
+      (e.message && e.message.includes("Duplicate key name"));
+    if (!isDup) throw e;
+  }
 }
 
 // Get all expenses
 app.get("/api/expenses", async (req, res) => {
   try {
-    console.log("GET /api/expenses");
+    const branchLoc = normalizeBranchLocation(req.query.location);
+    console.log("GET /api/expenses", branchLoc ? `(location=${branchLoc})` : "(all locations)");
     await ensureExpensesTable();
 
+    const params = [];
+    let whereClause = "";
+    if (branchLoc) {
+      whereClause = " WHERE LOWER(TRIM(location)) = LOWER(?)";
+      params.push(branchLoc);
+    }
+
     const [expenses] = await promisePool.query(
-      `SELECT id, expense_date AS date, description, category, amount, status, added_by, created_at, updated_at
+      `SELECT id, expense_date AS date, description, category, amount, status, location, added_by, created_at, updated_at
        FROM expenses
-       ORDER BY expense_date DESC, id DESC`
+       ${whereClause}
+       ORDER BY expense_date DESC, id DESC`,
+      params
     );
 
     res.json({
@@ -3807,7 +3829,7 @@ app.post("/api/expenses", async (req, res) => {
     console.log("POST /api/expenses", req.body);
     await ensureExpensesTable();
 
-    const { date, description, category, amount, status, added_by } = req.body;
+    const { date, description, category, amount, status, added_by, location } = req.body;
 
     if (!description || !String(description).trim()) {
       return res.status(400).json({
@@ -3831,16 +3853,18 @@ app.post("/api/expenses", async (req, res) => {
 
     const expenseDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
     const statusVal = status === "Paid" ? "Paid" : "Pending";
+    const branchLocation = normalizeBranchLocation(location);
 
     const [result] = await promisePool.query(
-      `INSERT INTO expenses (expense_date, description, category, amount, status, added_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO expenses (expense_date, description, category, amount, status, location, added_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         expenseDate,
         String(description).trim(),
         String(category).trim(),
         amountNum,
         statusVal,
+        branchLocation,
         added_by != null ? added_by : null
       ]
     );
@@ -3848,7 +3872,7 @@ app.post("/api/expenses", async (req, res) => {
     console.log("Expense added with ID:", result.insertId);
 
     const [[newExpense]] = await promisePool.query(
-      `SELECT id, expense_date AS date, description, category, amount, status, added_by, created_at, updated_at
+      `SELECT id, expense_date AS date, description, category, amount, status, location, added_by, created_at, updated_at
        FROM expenses WHERE id = ?`,
       [result.insertId]
     );
@@ -3873,7 +3897,7 @@ app.put("/api/expenses/:id", async (req, res) => {
   try {
     await ensureExpensesTable();
     const { id } = req.params;
-    const { date, description, category, amount, status } = req.body;
+    const { date, description, category, amount, status, location } = req.body;
 
     if (!description || !String(description).trim()) {
       return res.status(400).json({ success: false, message: "Description is required" });
@@ -3888,10 +3912,11 @@ app.put("/api/expenses/:id", async (req, res) => {
 
     const expenseDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
     const statusVal = status === "Paid" ? "Paid" : "Pending";
+    const branchLocation = normalizeBranchLocation(location);
 
     const [result] = await promisePool.query(
-      `UPDATE expenses SET expense_date = ?, description = ?, category = ?, amount = ?, status = ? WHERE id = ?`,
-      [expenseDate, String(description).trim(), String(category).trim(), amountNum, statusVal, id]
+      `UPDATE expenses SET expense_date = ?, description = ?, category = ?, amount = ?, status = ?, location = COALESCE(?, location) WHERE id = ?`,
+      [expenseDate, String(description).trim(), String(category).trim(), amountNum, statusVal, branchLocation, id]
     );
 
     if (result.affectedRows === 0) {
@@ -3899,7 +3924,7 @@ app.put("/api/expenses/:id", async (req, res) => {
     }
 
     const [[updatedExpense]] = await promisePool.query(
-      `SELECT id, expense_date AS date, description, category, amount, status, added_by, created_at, updated_at
+      `SELECT id, expense_date AS date, description, category, amount, status, location, added_by, created_at, updated_at
        FROM expenses WHERE id = ?`,
       [id]
     );
