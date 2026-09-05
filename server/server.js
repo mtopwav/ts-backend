@@ -3793,10 +3793,12 @@ app.get("/api/expenses", async (req, res) => {
     const branchLoc = normalizeBranchLocation(req.query.location);
     const dateFilter = req.query.date ? String(req.query.date).trim().slice(0, 10) : null;
     const hasValidDate = dateFilter && /^\d{4}-\d{2}-\d{2}$/.test(dateFilter);
+    const statusFilter = req.query.status ? String(req.query.status).trim() : null;
     console.log(
       "GET /api/expenses",
       branchLoc ? `(location=${branchLoc})` : "(all locations)",
-      hasValidDate ? `(date=${dateFilter})` : ""
+      hasValidDate ? `(date=${dateFilter})` : "",
+      statusFilter ? `(status=${statusFilter})` : ""
     );
     await ensureExpensesTable();
 
@@ -3809,6 +3811,10 @@ app.get("/api/expenses", async (req, res) => {
     if (hasValidDate) {
       whereParts.push("expense_date = ?");
       params.push(dateFilter);
+    }
+    if (statusFilter) {
+      whereParts.push("LOWER(TRIM(status)) = LOWER(?)");
+      params.push(statusFilter);
     }
     const whereClause = whereParts.length ? ` WHERE ${whereParts.join(" AND ")}` : "";
 
