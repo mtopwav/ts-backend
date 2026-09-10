@@ -3315,17 +3315,18 @@ app.put("/api/payments/:id/status", async (req, res) => {
   }
 });
 
-// Return payment (cashier): reduce amount_received, mark status returned, restore spareparts stock
+// Refund payment: write amount to payments.`return`, restore spareparts.quantity
+// by the exact refunded quantities (and reduce soldout_quantity the same amount).
 app.put("/api/payments/:id/return", async (req, res) => {
   let connection;
   try {
     await ensurePaymentsTable();
     await ensureSparepartsTable();
-    const partId = parseInt(req.params.id, 10);
-    const returnAmountRaw = req.body?.return_amount;
-    const returnAmount = parseFloat(returnAmountRaw);
+    const paymentId = parseInt(req.params.id, 10);
+    const returnAmount = parseFloat(req.body?.return_amount);
+    const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
 
-    if (!partId) {
+    if (!paymentId) {
       return res.status(400).json({
         success: false,
         message: "Payment ID is required"
@@ -3342,11 +3343,12 @@ app.put("/api/payments/:id/return", async (req, res) => {
     await connection.beginTransaction();
 
     const [rows] = await connection.query(
-      `SELECT id, status, amount_received, \`return\` AS return_amount, items_json, sparepart_id, quantity
+      `SELECT id, status, amount_received, amount_remain, \`return\` AS return_amount,
+              items_json, sparepart_id, quantity
        FROM payments
        WHERE id = ?
        FOR UPDATE`,
-      [partId]
+      [paymentId]
     );
 
     if (rows.length === 0) {
@@ -3359,52 +3361,129 @@ app.put("/api/payments/:id/return", async (req, res) => {
     }
 
     const payment = rows[0];
-    if (String(payment.status || '').trim().toLowerCase() === 'returned') {
+    const statusLower = String(payment.status || "").trim().toLowerCase();
+    if (statusLower === "returned") {
       await connection.rollback();
       connection.release();
       return res.status(400).json({
         success: false,
-        message: "This transaction has already been returned"
+        message: "This transaction has already been fully refunded"
       });
     }
 
     const amountReceived = Number(payment.amount_received) || 0;
     const existingReturn = Number(payment.return_amount) || 0;
-    if (returnAmount > amountReceived) {
+    const remainingRefundable = Math.max(0, amountReceived - existingReturn);
+    if (returnAmount > remainingRefundable + 0.0001) {
       await connection.rollback();
       connection.release();
       return res.status(400).json({
         success: false,
-        message: "Return amount cannot be greater than amount received"
+        message: `Return amount cannot be greater than remaining refundable (TZS ${remainingRefundable})`
       });
     }
 
-    const newAmountReceived = Math.max(0, amountReceived - returnAmount);
-    const newReturnAmount = existingReturn + returnAmount;
-
-    // Restore spareparts quantities and reverse soldout counters
-    let itemsToRestore = [];
-    if (payment.items_json) {
+    const parsePaymentItems = (raw) => {
+      if (!raw) return [];
       try {
-        const parsed = JSON.parse(payment.items_json);
-        itemsToRestore = (Array.isArray(parsed) ? parsed : []).map((it) => ({
-          sparepart_id: parseInt(it.sparepart_id, 10),
-          quantity: parseInt(it.quantity, 10) || 0
-        }));
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        return (Array.isArray(parsed) ? parsed : []).map((it) => {
+          const sparepartId = parseInt(it.sparepart_id ?? it.sparepartId, 10) || null;
+          const soldQty =
+            parseInt(it.original_quantity ?? it.quantity ?? it.qty, 10) || 0;
+          const returnedQty = parseInt(it.returned_quantity, 10) || 0;
+          // Legacy rows reduced `quantity` in place (no returned_quantity).
+          // Treat current quantity as remaining returnable in that case.
+          const hasReturnTracking =
+            it.returned_quantity != null || it.original_quantity != null;
+          const remainingQty = hasReturnTracking
+            ? Math.max(0, soldQty - returnedQty)
+            : Math.max(0, parseInt(it.quantity ?? it.qty, 10) || 0);
+          const originalQty = hasReturnTracking
+            ? soldQty
+            : remainingQty + returnedQty;
+          return {
+            ...it,
+            sparepart_id: sparepartId,
+            original_quantity: originalQty,
+            returned_quantity: returnedQty,
+            quantity: remainingQty
+          };
+        });
       } catch {
-        itemsToRestore = [];
+        return [];
       }
-    } else if (payment.sparepart_id) {
-      itemsToRestore = [{
-        sparepart_id: parseInt(payment.sparepart_id, 10),
-        quantity: parseInt(payment.quantity, 10) || 0
-      }];
+    };
+
+    let originalItems = parsePaymentItems(payment.items_json);
+    if (!originalItems.length && payment.sparepart_id) {
+      const qty = parseInt(payment.quantity, 10) || 0;
+      originalItems = [
+        {
+          sparepart_id: parseInt(payment.sparepart_id, 10),
+          original_quantity: qty,
+          returned_quantity: 0,
+          quantity: qty
+        }
+      ];
+    }
+
+    const remainingById = new Map();
+    for (const it of originalItems) {
+      if (!it.sparepart_id) continue;
+      const key = String(it.sparepart_id);
+      remainingById.set(key, (remainingById.get(key) || 0) + (Number(it.quantity) || 0));
+    }
+
+    // Restore only quantities entered in the refund modal (capped by remaining sold qty)
+    const itemsToRestore = [];
+    for (const it of requestedItems) {
+      const sparepartId = parseInt(it.sparepart_id ?? it.sparepartId, 10);
+      let qty = parseInt(it.quantity ?? it.qty, 10) || 0;
+      if (!sparepartId || qty <= 0) continue;
+      const key = String(sparepartId);
+      if (!remainingById.has(key)) {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({
+          success: false,
+          message: `Spare part ID ${sparepartId} is not part of this payment`
+        });
+      }
+      const maxQty = remainingById.get(key) || 0;
+      qty = Math.max(0, Math.min(qty, maxQty));
+      if (qty <= 0) continue;
+      itemsToRestore.push({ sparepart_id: sparepartId, quantity: qty });
+      remainingById.set(key, Math.max(0, maxQty - qty));
+    }
+
+    if (!itemsToRestore.length) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        message: "Select at least one spare part quantity to return"
+      });
     }
 
     for (const item of itemsToRestore) {
-      if (!item.sparepart_id || item.quantity <= 0) continue;
-      // Restore stock and soldout counter only; quantity_added unchanged.
-      await connection.query(
+      const [spRows] = await connection.query(
+        `SELECT id, quantity, soldout_quantity, part_name, part_number
+         FROM spareparts
+         WHERE id = ?
+         FOR UPDATE`,
+        [item.sparepart_id]
+      );
+      if (!spRows.length) {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({
+          success: false,
+          message: `Spare part not found (ID: ${item.sparepart_id})`
+        });
+      }
+
+      const [updateResult] = await connection.query(
         `UPDATE spareparts
          SET quantity = quantity + ?,
              soldout_quantity = GREATEST(0, COALESCE(soldout_quantity, 0) - ?),
@@ -3412,25 +3491,88 @@ app.put("/api/payments/:id/return", async (req, res) => {
          WHERE id = ?`,
         [item.quantity, item.quantity, item.sparepart_id]
       );
+      if (!updateResult || updateResult.affectedRows === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(500).json({
+          success: false,
+          message: `Failed to restore stock for spare part ID ${item.sparepart_id}`
+        });
+      }
     }
+
+    // Track returned quantities so later refunds cannot over-restore stock
+    const restoreQtyById = new Map();
+    for (const it of itemsToRestore) {
+      const key = String(it.sparepart_id);
+      restoreQtyById.set(key, (restoreQtyById.get(key) || 0) + it.quantity);
+    }
+    const updatedItems = originalItems.map((it) => {
+      const key = String(it.sparepart_id);
+      const take = restoreQtyById.get(key) || 0;
+      const remainingQty = Number(it.quantity) || 0;
+      const used = Math.min(take, remainingQty);
+      if (restoreQtyById.has(key)) {
+        restoreQtyById.set(key, Math.max(0, take - used));
+      }
+      const originalQty = Number(it.original_quantity) || remainingQty;
+      const returnedQty = (Number(it.returned_quantity) || 0) + used;
+      const nextRemaining = Math.max(0, originalQty - returnedQty);
+      return {
+        ...it,
+        original_quantity: originalQty,
+        returned_quantity: returnedQty,
+        // Keep quantity as remaining returnable for older clients
+        quantity: nextRemaining
+      };
+    });
+    const allItemsReturned = updatedItems.every((it) => (Number(it.quantity) || 0) <= 0);
+    const remainingPaymentQty = updatedItems.reduce(
+      (sum, it) => sum + (Number(it.quantity) || 0),
+      0
+    );
+
+    const newReturnAmount = existingReturn + returnAmount;
+    const fullyRefunded =
+      allItemsReturned || newReturnAmount >= amountReceived - 0.0001;
+    const newStatus = fullyRefunded ? "Returned" : (payment.status || "Approved");
+    const newAmountRemain = fullyRefunded
+      ? 0
+      : Math.max(0, Number(payment.amount_remain) || 0);
 
     await connection.query(
       `UPDATE payments
-       SET amount_received = ?, \`return\` = ?, status = 'Returned', updated_at = NOW()
+       SET \`return\` = ?,
+           status = ?,
+           amount_remain = ?,
+           quantity = ?,
+           items_json = ?,
+           updated_at = NOW()
        WHERE id = ?`,
-      [newAmountReceived, newReturnAmount, partId]
+      [
+        newReturnAmount,
+        newStatus,
+        newAmountRemain,
+        remainingPaymentQty,
+        JSON.stringify(updatedItems),
+        paymentId
+      ]
     );
 
     await connection.commit();
     connection.release();
     return res.json({
       success: true,
-      message: "Transaction returned successfully",
+      message: "Refund saved: return amount updated and spare part stock restored",
+      restored_items: itemsToRestore,
       payment: {
-        id: partId,
-        status: 'Returned',
-        amount_received: newAmountReceived,
-        return_amount: newReturnAmount
+        id: paymentId,
+        status: newStatus,
+        amount_received: amountReceived,
+        return_amount: newReturnAmount,
+        amount_remain: newAmountRemain,
+        quantity: remainingPaymentQty,
+        items: updatedItems
       }
     });
   } catch (error) {
@@ -3443,7 +3585,7 @@ app.put("/api/payments/:id/return", async (req, res) => {
     console.error("Return payment error:", error);
     return res.status(500).json({
       success: false,
-      message: error.message || "An error occurred while processing return",
+      message: "An error occurred while processing the refund",
       error: process.env.NODE_ENV === "development" ? error.message : undefined
     });
   }
